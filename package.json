@@ -22,12 +22,12 @@
   ],
   "repository": {
     "type": "git",
-    "url": "https://github.com/LT916128944/DHS-whale-follow-active.git"
+    "url": "https://github.com/LT916128944/DSH-whale-follow-active.git"
   },
   "bugs": {
-    "url": "https://github.com/LT916128944/DHS-whale-follow-active/issues"
+    "url": "https://github.com/LT916128944/DSH-whale-follow-active/issues"
   },
-  "homepage": "https://github.com/LT916128944/DHS-whale-follow-active#readme",
+  "homepage": "https://github.com/LT916128944/DSH-whale-follow-active#readme",
   "upstream": {
     "name": "dsh-whale-widget",
     "author": "MeteorNOX",
