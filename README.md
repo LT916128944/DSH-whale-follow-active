@@ -74,6 +74,10 @@ dsh plugin --profile desktop add link:D:\path\to\DSH-whale-follow-active
 | **模型匹配** | **至少填一个你实际在用的 model id** | `deepseek-v4.1-flash-1017` |
 
 填完点「**测试连通性**」确认能取到数字再保存。
+<img width="420" height="648" alt="964e1ff45d5c2793f9377ffb7555c42e" src="https://github.com/user-attachments/assets/5d302511-033f-40b7-baed-8c47a3446409" />
+<img width="690" height="1803" alt="64b4eb5071cf24a110570c832c4b15c4" src="https://github.com/user-attachments/assets/af63655c-fdc0-4530-a3c5-fa001df25a3f" />
+
+
 
 ### 最容易踩的坑：模型匹配
 
