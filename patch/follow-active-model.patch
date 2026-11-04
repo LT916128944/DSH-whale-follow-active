@@ -1,0 +1,473 @@
+diff --git a/assets/whale-widget.js b/assets/whale-widget.js
+index 8606759..66285ed 100644
+--- a/assets/whale-widget.js
++++ b/assets/whale-widget.js
+@@ -358,6 +358,23 @@ var SIZE_URL = '/dsh-whale/size.json'
+ var IMG_URL = '/dsh-whale/image.png?v=2'
+ var GIF_URL = '/dsh-whale/rua.gif'
+ var BUBBLE_URL = '/dsh-whale/bubble.json'
++// 「跟随当前模型」开关（纯前端展示偏好）。
++// 为什么放在常量区：主菜单在 ~2200 行就构建了勾选框，而泡泡渲染引擎在 ~17400 行，
++// 状态初始化必须早于任何一个读取方，否则菜单拿到 undefined 会显示成"未勾选"。
++var FOLLOW_KEY = 'dshw-follow-model'
++// DSH 里属于「DeepSeek 自家」的两个 provider 路由。判定当前该显示官方余额还是中转站余额，
++// **看 provider 而不是 model id**（中转站可以配与官方同名的 model id）。
++var OFFICIAL_PROVIDERS = ['deepseek-official', 'deepseek-account']
++var followModelOn = true
++try {
++  var _fv = localStorage.getItem(FOLLOW_KEY)
++  if (_fv === '0') followModelOn = false
++  else if (_fv === '1') followModelOn = true
++} catch (err) {}
++function setFollowModelOn(v) {
++  followModelOn = v !== false
++  try { localStorage.setItem(FOLLOW_KEY, followModelOn ? '1' : '0') } catch (err) {}
++}
+ 
+ // ===== v815：自定义泡泡框 —— 常量必须在**泡泡构建之前**就绪 =====
+ // ⚠️ 血的教训（v815 首版把这些常量写在 13000 行附近，而泡泡在 12600 行就调渲染器了）：
+@@ -2211,6 +2228,40 @@ function codexStatsCheckbox() {
+   codexStatsToggle = el
+   return el
+ }
++// —— 「跟随当前模型」开关：勾上后，泡泡里的余额/今日已用随当前会话的模型自动切换来源 ——
++// 官方两路（deepseek-official / deepseek-account）⇒ DeepSeek 内置余额；
++// 其它 provider（含 OpenAI 兼容中转站）⇒ 用「小鲸鱼记账 → 模型」里为该模型配的余额接口。
++// 取值落在 localStorage（纯前端展示偏好，不属于宿主 schema，无需新增配置文件）。
++var rowFollow = menuRow()
++var followToggle = document.createElement('input')
++followToggle.type = 'checkbox'
++followToggle.className = 'dshwv-check'
++followToggle.checked = followModelOn
++followToggle.title = '勾上后：用中转站模型时显示中转站余额，用 DeepSeek 官方模型时显示官方余额'
++followToggle.addEventListener('change', function () {
++  setFollowModelOn(followToggle.checked)
++  try { followLabelSync() } catch (err) {}
++  try { render() } catch (err) {}
++  try { followModelRefresh() } catch (err) {}
++})
++var followNameEl = document.createElement('span')
++followNameEl.style.flex = '0 1 auto'
++followNameEl.style.minWidth = '0'
++followNameEl.style.overflow = 'hidden'
++followNameEl.style.textOverflow = 'ellipsis'
++followNameEl.style.whiteSpace = 'nowrap'
++followNameEl.style.fontSize = '.85em'
++followNameEl.style.opacity = '.72'
++rowFollow.appendChild(menuLabel('跟随当前模型'))
++rowFollow.appendChild(followNameEl)
++rowFollow.appendChild(followToggle)
++menuBox.appendChild(rowFollow)
++function followLabelSync() {
++  try {
++    followNameEl.textContent = followModelOn ? ('· ' + activeSourceName()) : '· 固定 DeepSeek'
++  } catch (err) {}
++}
++try { followLabelSync() } catch (err) {}
+ // —— 资源管理:集中查看/删除已导入的图片与音频(角色图/泡泡图/音频片段/音效组) ——
+ var rowRes = menuRow()
+ var resOpenBtn = document.createElement('button')
+@@ -14038,7 +14089,10 @@ var state = {
+   peakHolidays: null,
+   status: 'loading',
+   message: '',
+-  flip: false
++  flip: false,
++  // 「跟随当前模型」（issue #45）：宿主在 last-turn.json 里下发最近观测到的路由
++  // {provider, model, official, modelId, at}；null = 还没观测到 ⇒ 一切照旧走内置 DeepSeek。
++  activeModel: null
+ }
+ // —— 吸附与翻转自定义配置 ——
+ // mode: 'ratio' 比例吸附 / 'px' 绝对吸附 / 'off' 关闭（无吸附、无翻转，纯自由）
+@@ -17426,14 +17480,157 @@ function bubbleModuleFontU(level) {
+   n = Math.max(1, Math.min(50, Math.round(n)))
+   return Math.round(40 + (n - 1) * 200 / 49)
+ }
++// 「跟随当前模型」（issue #45 的最小实现）
++// 宿主在 last-turn.json 里下发 activeModel = {provider, model, official, modelId, at}。
++//   · official=true（provider 是 deepseek-official / deepseek-account）⇒ 用内置 DeepSeek 余额；
++//   · 否则按 modelId 找注册表里的自定义模型（如「OpenAI 兼容中转站」）⇒ 用它自己的余额/今日已用。
++// 判定看 **provider** 而不是 model id：中转站可以配与官方同名的 model id，只看名字会静默错标。
++// 注意：FOLLOW_KEY / followModelOn / setFollowModelOn 定义在文件顶部的常量区（主菜单在更早的
++// 行号就被构建了，若状态初始化放在这里，菜单读到的会是 undefined ⇒ 勾选框显示成未勾选）。
++// ── 当前模型的两个来源，前者优先 ────────────────────────────────────────────
++// ① 宿主路由（权威）：last-turn.json 的 activeModel，来自会话事件 request/context 等，
++//    带真实 provider ⇒ 中转站配了与官方同名的 model id 也不会错标。需要宿主插件已更新。
++// ② DOM 兜底（免重启）：DSH 的模型选择器把当前选择渲染成
++//    span[data-provider-id][data-model-id]（会话输入区 / 会话列表 / 消息内三处都带）。
++//    只读属性、零侵入；宿主还没重启时靠它先把功能跑起来。
++function domActiveModel() {
++  try {
++    var nodes = document.querySelectorAll('[data-provider-id][data-model-id]')
++    if (!nodes || !nodes.length) return null
++    // 该属性出现在三处：输入区触发器（triggerLabel，= 当前选择）、菜单项（option）、消息内标签。
++    // 只认**触发器**：它在 .triggerLabel 容器里、且不在 role=menu 的弹出菜单内。
++    // 这样打开选择器时不会被"列表里的某一项"或历史消息里的标签带偏。
++    var best = null
++    for (var i = 0; i < nodes.length; i++) {
++      var el = nodes[i]
++      if (!el || !el.isConnected) continue
++      var provider = String(el.getAttribute('data-provider-id') || '')
++      var model = String(el.getAttribute('data-model-id') || '')
++      if (!provider || !model) continue
++      var parent = el.parentNode
++      var pcls = parent && parent.className ? String(parent.className) : ''
++      // 触发器：span 的父节点类名带 triggerLabel，且它属于一个 aria-haspopup="menu" 的按钮
++      var inTrigger = pcls.indexOf('triggerLabel') >= 0
++      try {
++        if (!inTrigger && el.closest) inTrigger = !!(el.closest('button[aria-haspopup="menu"]'))
++      } catch (err) {}
++      var inMenu = false
++      try { inMenu = !!(el.closest && el.closest('[role="menu"]')) } catch (err) {}
++      if (!inTrigger || inMenu) continue
++      var r = el.getBoundingClientRect ? el.getBoundingClientRect() : null
++      if (!r || r.width <= 0 || r.height <= 0) continue
++      best = { provider: provider, model: model }
++      break
++    }
++    if (!best) return null
++    var official = OFFICIAL_PROVIDERS.indexOf(best.provider) >= 0
++    var mid = official ? 'deepseek' : matchModelIdByModel(best.model)
++    return { provider: best.provider, model: best.model, official: official, modelId: mid, from: 'dom' }
++  } catch (err) { return null }
++}
++function matchModelIdByModel(model) {
++  try {
++    var name = String(model || '').toLowerCase()
++    if (!name) return ''
++    for (var i = 0; i < apiModels.length; i++) {
++      var m = apiModels[i]
++      if (!m || !m.id || m.builtin) continue
++      var ids = (m.matchIds && m.matchIds.length) ? m.matchIds : [m.name, m.id]
++      for (var j = 0; j < ids.length; j++) {
++        var k = String(ids[j] || '').toLowerCase().trim()
++        if (k && name.indexOf(k) >= 0) return m.id
++      }
++    }
++  } catch (err) {}
++  return ''
++}
++function currentActiveModel() {
++  // 优先 DOM：它是**当前会话**模型选择器上显示的那一个，用户一换就立刻变（不用等一次请求）。
++  // 其次宿主路由：DOM 读不到时（子智能体会话、面板未渲染）用最近一次真实请求的路由兜底。
++  var dom = domActiveModel()
++  if (dom) return dom
++  try {
++    if (typeof state === 'undefined' || !state) return null
++    var host = state.activeModel
++    if (host && host.provider && host.model) return host
++  } catch (err) {}
++  return null
++}
++// 当前该跟随到的自定义模型（无则 null ⇒ 一切照旧走内置 DeepSeek）
++function followTargetModel() {
++  if (!followModelOn) return null
++  var am = currentActiveModel()
++  if (!am || am.official) return null
++  if (!am.modelId || am.modelId === 'deepseek') return null
++  return apiModelById(am.modelId)
++}
++// 「当前是否在用非官方模型（中转站等）」。
++// ⚠️ 这个判定**独立于** followTargetModel() 是否找到了注册表条目：
++//   正在用中转站、但它那一栏余额还没拉到 / 没配进注册表时，**绝不能**回落去显示
++//   DeepSeek 官方余额 —— 那正是用户报的那个 bug（用中转站却看到官方 ¥12.50）。
++//   此时正确答案是「不知道」：加载中显示 …，确实没有该模型则显示 —。
++function currentIsRemote() {
++  if (!followModelOn) return false
++  var am = currentActiveModel()
++  return !!(am && !am.official)
++}
++// 泡泡里「余额来源」的显示名：官方 ⇒ DeepSeek；中转站 ⇒ 该模型在注册表里的名字
++function activeSourceName() {
++  var am = currentActiveModel()
++  if (!am) return 'DeepSeek'
++  if (am.official) return 'DeepSeek'
++  var m = am.modelId ? apiModelById(am.modelId) : null
++  if (m && m.name) return m.name
++  return am.model || '当前模型'
++}
+ function bubbleAmountText() {
++  if (currentIsRemote()) {
++    var ft = followTargetModel()
++    if (!ft) {
++      // 模型列表还没加载完 ⇒ 「…」并催一次；加载完仍没有 ⇒ 「—」（不假装是官方余额）
++      try { loadApiModels(null, false) } catch (err) {}
++      return (typeof apiModelsLoaded !== 'undefined' && apiModelsLoaded) ? '—' : '…'
++    }
++    return apiModelBalanceText(ft.id)
++  }
+   var v = shown !== null ? shown : (state.balance !== null ? state.balance : null)
+   if (v === null) return '…'
+   return fmt(v, state.currency)
+ }
+ function bubbleTodayText() {
++  if (currentIsRemote()) {
++    var ftT = followTargetModel()
++    if (!ftT) return (state.usageLabel || '今日已用') + ' --'
++    return (state.usageLabel || '今日已用') + ' ' + apiModelTodayText(ftT.id)
++  }
+   return (state.usageLabel || '今日已用') + ' ' + (state.todayUsage !== null && state.todayUsage !== undefined ? fmt(state.todayUsage, state.todayUsageCurrency || state.currency) : '--')
+ }
++// 当前模型变了：若泡泡正开着，把内容行按新来源重建一次；否则只等下一次弹泡泡自然取新值。
++// （不整泡闪烁：只重建模块行——与 frameReapplyCurrent 的做法一致。）
++function followModelRefresh() {
++  function redo() {
++    try { render() } catch (err) {}
++    try { if (bubbleShown && bubbleLiveMods && textBox) bubbleRowsTo(textBox, bubbleLiveMods) } catch (err) {}
++  }
++  try {
++    redo()
++    // 🐳 顺手刷新自定义模型余额（中转站余额靠 api-models.json 拉），回来后再重绘一次
++    if (followTargetModel()) { try { loadApiModels(redo, true) } catch (err) {} }
++  } catch (err) {}
++}
++// 标题里的来源名：跟随中转站时，把**默认标题「DeepSeek 余额」**换成该中转站的名字，
++// 让「DeepSeek 余额」自动变成「OpenAI 兼容中转站 余额」；官方模型下原样不动。
++// ⚠️ 只改这一种固定写法，不做全文替换 —— 用户自己写的句子里出现 DeepSeek 不该被悄悄改写。
++// 想自定义文案时用占位符 {source}（不依赖任何字面量）。
++var SOURCE_TITLE_RE = /DeepSeek(\s*余额)/
++function bubbleSourceAwareText(s) {
++  var t = String(s == null ? '' : s)
++  if (t.indexOf('{source}') >= 0) t = t.split('{source}').join(activeSourceName())
++  if (!currentIsRemote()) return t
++  var name = activeSourceName()
++  if (!name || name === 'DeepSeek') return t
++  return t.replace(SOURCE_TITLE_RE, name + '$1')
++}
+ // v782：赠金 / 充值余额两个数值模块的取数（与「总余额(充值金额+赠金)」同源：宿主余额返回体）。
+ //   ⚠️ 两个数字**可能拿不到**（厂商没有该字段、或未登录账号）⇒ 显示 `—`，**不显示 0**
+ //   —— 0 的意思是"确实没有了"，与"读不到"是两件事（记账也依赖这个区分）。
+@@ -17823,7 +18020,14 @@ function bubbleContentTokenMap(m) {
+     // v782：充值余额模块（{recharge_ds}）。
+     map['recharge_ds'] = bubbleRechargeText()
+   } else if (m.type === 'today') {
+-    v = (state.todayUsage !== null && state.todayUsage !== undefined ? fmt(state.todayUsage, state.todayUsageCurrency || state.currency) : '--')
++    // 「跟随当前模型」：内置「今日已用」也要跟着切来源（中转站走它自己的余额差/估算）。
++    // 同 bubbleAmountText：判定用 currentIsRemote()，避免"中转站加载中"时回落到官方口径。
++    if (currentIsRemote()) {
++      var ftToday = followTargetModel()
++      v = ftToday ? apiModelTodayText(ftToday.id) : '--'
++    } else {
++      v = (state.todayUsage !== null && state.todayUsage !== undefined ? fmt(state.todayUsage, state.todayUsageCurrency || state.currency) : '--')
++    }
+     map['expense_ds'] = v
+   } else if (m.type === 'session') {
+     // v768：对话名模块 —— {session} = 当前对话标题（按模块的「保留长度」截断）
+@@ -18292,7 +18496,7 @@ function bubbleRowContentOf(mod) {
+     }
+     return { txt: '', line: null }
+   }
+-  return { txt: mod.text || '', line: null }
++  return { txt: bubbleSourceAwareText(mod.text || ''), line: null }
+ }
+ // 渲染一组模块为泡泡内容(F2 渲染层:按行分组 → 行内 flex 并排(≤6 模块/行)→ 超宽自动折行;
+ // 图片单独一整行;泡泡行数上限维持 6)
+@@ -18414,6 +18618,46 @@ function bubbleRowsTo(parentEl, mods) {
+   }
+   // 超宽判定(与旧版一致):先单行渲染,测量实际超出泡泡内宽(560u)才允许该块内折行——
+   // 预览与真实共用此逻辑,保证两者一致
++  //
++  // v-follow：**超宽时先自动缩字号,缩到底还放不下才折行**。
++  //   为什么：内置标题模块的 size 是按「DeepSeek 余额」这种短标题调的；一旦来源名变长
++  //   （跟随中转站后会变成「OpenAI 兼容中转站 余额」），原字号直接把标题挤成两行、
++  //   又大又占地方。标题本该一行 —— 缩字号比折行更贴近"标题"的观感。
++  //   放得下时一个像素都不动，所以官方模型下的外观完全不受影响。
++  //
++  //   下限分两档：常规 60%（再小就影响观感）；若 60% 仍放不下，说明这行本来字号就偏大
++  //   （比如用户把标题调到 size 14），这时折成两行的代价比小字号更糟 ⇒ 允许继续缩到 40%。
++  //   40% 都放不下才真的折行（那已经是"一段很长的话"而不是标题了）。
++  var FIT_MIN_RATIO = 0.6
++  var FIT_HARD_MIN_RATIO = 0.4
++  function applyMult(el, uOrig, ratio) {
++    var scaled = Math.round(uOrig * ratio * 100) / 100
++    el.style.fontSize = 'calc(var(--dshw-u) * ' + scaled + ')'
++    return scaled
++  }
++  function fitFontToWidth(blk, capPx) {
++    try {
++      var el = blk && blk.el
++      if (!el || !capPx) return false
++      var uOrig = bubbleModuleFontU(blk.fSize)
++      el.style.fontSize = 'calc(var(--dshw-u) * ' + uOrig + ')'
++      if (el.scrollWidth <= capPx + 2) return false // 本来就放得下：不动
++      var need = capPx / el.scrollWidth
++      if (!isFinite(need) || need <= 0) return false
++      // 留 2% 余量，避免四舍五入后又刚好卡在边界上
++      need = need * 0.98
++      // 第一档：常规下限
++      applyMult(el, uOrig, Math.max(FIT_MIN_RATIO, need))
++      if (el.scrollWidth <= capPx + 2) return true
++      // 第二档：仍放不下 ⇒ 放宽到硬下限，能单行就单行
++      if (need >= FIT_HARD_MIN_RATIO) {
++        applyMult(el, uOrig, Math.max(FIT_HARD_MIN_RATIO, need))
++        if (el.scrollWidth <= capPx + 2) return true
++      }
++      el.style.fontSize = 'calc(var(--dshw-u) * ' + uOrig + ')' // 缩到硬下限仍超：还原，交给折行
++      return false
++    } catch (err) { return false }
++  }
+   function maybeWrap(blk) {
+     if (!blk || blk.peak) return
+     try {
+@@ -18442,6 +18686,22 @@ function bubbleRowsTo(parentEl, mods) {
+       }
+       var capPx = (compFs && multNow) ? 560 * compFs / multNow : 0
+       if (capPx > 0 && blk.el.scrollWidth > capPx + 2) {
++        // ① 先自动缩字号（仅文本模块 —— 见下），缩完放得下就保持单行、不折行
++        //
++        //   ⚠️ **只对 type:'text' 生效**，不是所有超宽模块：
++        //   文本模块在这套配置里就是"标题/短文案"（如「DeepSeek 余额」「今日已用」），
++        //   它超宽是**来源名变长**造成的意外，缩字号是对的；
++        //   而随机语句/自定义长句是用户**故意写长**的，那种就该折行 ——
++        //   把它缩到 40% 反而毁掉可读性，比折行糟得多。数值/峰谷模块本来就短，无需处理。
++        var isTextMod = !!(blk.mod && blk.mod.type === 'text')
++        if (isTextMod && fitFontToWidth(blk, capPx)) {
++          blk.el.style.maxWidth = ''
++          blk.el.style.whiteSpace = 'nowrap'
++          blk.el.style.overflowWrap = ''
++          blk.el.style.wordBreak = ''
++          return
++        }
++        // ② 缩到下限仍放不下（或不是文本模块）：退回原来的折行行为
+         blk.el.style.maxWidth = capPx + 'px'
+         blk.el.style.whiteSpace = 'normal'
+         blk.el.style.overflowWrap = 'anywhere'
+@@ -19065,6 +19325,15 @@ function render() {
+   // 消耗金额泡泡显示期间，余额渲染不覆盖其内容（金额行/标题行/提示行）
+   if (costBubbleActive) return
+   var amount, hint
++  // 「跟随当前模型」：内置默认泡泡（amountEl/hintEl 那套）也要跟着切数据源。
++  // ⚠️ 判定用 currentIsRemote()（只看 provider），**不是** followTargetModel()：
++  //    正在用中转站、但它那一栏余额还在加载时，绝不能回落显示官方 ¥12.50。
++  if (currentIsRemote()) {
++    amountEl.textContent = bubbleAmountText()
++    if (bubbleRandomActive && bubbleRandomLines) applyBubbleLines(bubbleRandomLines)
++    else setHint(bubbleTodayText())
++    return
++  }
+   if (state.status === 'error') {
+     amount = shown !== null ? fmt(shown, state.currency) : '--'
+     hint = state.message ? state.message.slice(0, 14) : '获取失败 · 点击重试'
+@@ -22284,6 +22553,18 @@ function pollLastTurn() {
+       .then(function (r) { return r.json() })
+       .then(function (d) {
+         if (!d || !d.ok || typeof d.seq !== 'number') return
++        // 「跟随当前模型」：本接口每秒都在轮询，顺路接收宿主观测到的路由。
++        // 变了才重绘（并让内置余额立刻改用新来源），没变就当无事发生。
++        try {
++          var prevAm = state.activeModel
++          var nextAm = d.activeModel || null
++          var prevKey = prevAm ? (prevAm.provider + '/' + prevAm.model + '/' + prevAm.official) : ''
++          var nextKey = nextAm ? (nextAm.provider + '/' + nextAm.model + '/' + nextAm.official) : ''
++          if (prevKey !== nextKey) {
++            state.activeModel = nextAm
++            try { followModelRefresh() } catch (err) {}
++          }
++        } catch (err) {}
+         if (!lastCostAligned) {
+           // 首次拿到数据：以本地记忆的 seq 为基准，只弹比它更新的轮次
+           lastCostAligned = true
+@@ -22313,7 +22594,22 @@ function pollLastTurn() {
+       .catch(function () {})
+   } catch (err) {}
+ }
+-setInterval(function () { pollLastTurn(); pollWaitState() }, 1000)
++// DOM 兜底（无需重启宿主）：每秒看一次界面上的模型选择器属性，变了就重绘。
++// 宿主 activeModel 存在时以下面这个 key 为准也会自动跟随，两路互不干扰。
++var lastDomModelKey = ''
++function pollActiveModelDom() {
++  try {
++    if (!followModelOn) return
++    var am = currentActiveModel()
++    var key = am ? (am.provider + '/' + am.model) : ''
++    if (key === lastDomModelKey) return
++    lastDomModelKey = key
++    try { followLabelSync() } catch (err) {}
++    try { followModelRefresh() } catch (err) {}
++    try { render() } catch (err) {}
++  } catch (err) {}
++}
++setInterval(function () { pollLastTurn(); pollWaitState(); pollActiveModelDom() }, 1000)
+ }
+ // 主界面检测通过（或稍后由 MutationObserver 检测到）后执行挂件初始化；非主界面不启动
+ try { dshwTryStart(true) } catch (err) {}
+diff --git a/lib/index.js b/lib/index.js
+index d1acaaa..cdddbe3 100644
+--- a/lib/index.js
++++ b/lib/index.js
+@@ -894,6 +894,42 @@ export default {
+     let lastTurnSeq = 0
+     const disposers = []
+ 
++    // ── 跟随当前模型（issue #45 / PR #174 的最小实现）──────────────────────────
++    // 数据源：宿主会话事件 `request/context`（{provider, model, contextWindow}）、
++    // `request/header`（header.config = {provider, model, reasoningEffort}）与
++    // `assistant/message`（message.source = {kind:'model', provider, model}）。
++    // 这三者都带 **provider**，而 model id 单独用不可靠（中转站可以配同名 id，上游还会改名），
++    // 所以判定顺序是：provider 属于 DeepSeek 官方两路 → 内置；否则按 model 匹配注册表 matchIds。
++    let activeModel = null // { provider, model, at, sessionId, official, modelId }
++    const OFFICIAL_PROVIDERS = ['deepseek-official', 'deepseek-account']
++    function resolveActiveModelId(provider, model) {
++      const p = String(provider || '')
++      if (OFFICIAL_PROVIDERS.indexOf(p) >= 0) return { official: true, modelId: API_BUILTIN_ID }
++      const name = String(model || '').toLowerCase()
++      try {
++        for (const m of readApiRegistry().models) {
++          if (!m || !m.id) continue
++          const ids = Array.isArray(m.matchIds) && m.matchIds.length ? m.matchIds : [m.name, m.id]
++          for (const s of ids) {
++            const k = String(s || '').toLowerCase().trim()
++            if (k && name && name.indexOf(k) >= 0) return { official: false, modelId: m.id }
++          }
++        }
++      } catch (err) {}
++      return { official: false, modelId: '' }
++    }
++    function noteActiveModel(sessionId, provider, model) {
++      try {
++        if (!provider || !model) return
++        const r = resolveActiveModelId(provider, model)
++        activeModel = {
++          provider: String(provider), model: String(model), at: Date.now(),
++          sessionId: String(sessionId || ''), official: r.official,
++          modelId: r.modelId || API_BUILTIN_ID,
++        }
++      } catch (err) {}
++    }
++
+     // 持久化 seq：热重载/重启后 seq 继续递增，前端不会把新轮次误判为旧轮次
+     function readTurnSeq() {
+       for (const p of TURN_FILE_CANDIDATES) {
+@@ -950,7 +986,23 @@ export default {
+           finalizeTurn(sessionId)
+           return
+         }
++        // 「跟随当前模型」：这三个事件都带 provider，随时更新最后一次观测到的路由
++        if (type === 'request/context') {
++          noteActiveModel(sessionId, d.provider, d.model)
++          return
++        }
++        if (type === 'model/selection') {
++          noteActiveModel(sessionId, d.provider, d.model)
++          return
++        }
++        if (type === 'request/header') {
++          const cfg = d.header && d.header.config
++          if (cfg) noteActiveModel(sessionId, cfg.provider, cfg.model)
++          return
++        }
+         if (type !== 'assistant/message') return
++        const src = d.message && d.message.source
++        if (src && src.provider) noteActiveModel(sessionId, src.provider, src.model)
+         const turn = Number(d.turn)
+         const usage = d.usage
+         if (!usage || typeof usage !== 'object' || !isFinite(turn)) return
+@@ -3624,6 +3676,8 @@ export default {
+         const payload = lastTurn
+           ? { ok: true, seq: lastTurnSeq, turn: lastTurn.turn, amount: lastTurn.amount, tokens: lastTurn.tokens, ts: lastTurn.ts }
+           : { ok: true, seq: 0, turn: null, amount: null, tokens: null, ts: null }
++        // 「跟随当前模型」：顺路带出宿主观测到的当前路由（前端本来就在每秒轮询这个接口）
++        payload.activeModel = activeModel
+         res.writeHead(200, JSON_HEADERS)
+         res.end(JSON.stringify(payload))
+       },
