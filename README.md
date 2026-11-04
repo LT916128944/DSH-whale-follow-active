@@ -44,13 +44,13 @@ C:\Users\<你的用户名>\.dsh\profiles\desktop\node_modules\dsh-whale-widget\
 ### 方式二：从 GitHub 装
 
 ```bash
-dsh plugin --profile desktop add github:lt916128944-code/dsh-whale-widget-follow
+dsh plugin --profile desktop add github:LT916128944/DHS-whale-follow-active
 ```
 
 ### 方式三：本地目录装（开发用）
 
 ```bash
-dsh plugin --profile desktop add link:D:\path\to\dsh-whale-widget-follow
+dsh plugin --profile desktop add link:D:\path\to\DHS-whale-follow-active
 ```
 
 ---
