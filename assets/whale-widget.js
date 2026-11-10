@@ -375,6 +375,38 @@ function setFollowModelOn(v) {
   followModelOn = v !== false
   try { localStorage.setItem(FOLLOW_KEY, followModelOn ? '1' : '0') } catch (err) {}
 }
+// ── 中转站余额取数节流（v0.4.2-follow.2）─────────────────────────────────────
+// 以前：判定"当前模型变了"就直接 loadApiModels(force) 全网拉一遍。可这条判定跑在 1 秒
+// 轮询里（pollActiveModelDom / pollLastTurn），只要界面上的判定值与上次记下的不一致
+// （DOM 抖动、宿主回包先后、选择器被遮住时读不到），就会**每秒**向中转站的
+// /api/user/self 打一次请求 —— 真机日志里 1 秒两条，纯属暴力轮询。
+// 余额不是秒级指标：轮询/重绘路径**一律不联网**，真正联网取数的入口只有三处——
+//   ① 冷启动（模型列表还没拿到，见 bubbleAmountText）
+//   ② 用户点鲸鱼/角色（点一次 = 拉一次，见 whaleClick）
+//   ③ 用户点「小鲸鱼记账 → 刷新」按钮
+// 自动路径再叠一层最小间隔，防止连点或异常抖动把请求放大。
+// 与上面 FOLLOW_KEY 同理：这里必须放在**常量区**，因为主菜单（~2250 行）比泡泡引擎（~17600 行）先执行。
+var REMOTE_FETCH_MIN_MS = 30000 // 自动路径最小间隔
+var REMOTE_FETCH_FORCE_MIN_MS = 4000 // 显式刷新也留一点去抖余量（连点不重复打）
+var remoteFetchAt = 0
+var remoteFetchInFlight = false
+function remoteBalanceFetch(force, cb) {
+  var now = Date.now()
+  var floor = force ? REMOTE_FETCH_FORCE_MIN_MS : REMOTE_FETCH_MIN_MS
+  if (remoteFetchInFlight || (remoteFetchAt && now - remoteFetchAt < floor)) {
+    if (cb) { try { cb() } catch (err) {} }
+    return
+  }
+  remoteFetchAt = now
+  remoteFetchInFlight = true
+  function done(res) {
+    remoteFetchInFlight = false
+    // 失败不占用"冷却时间"，否则用户点一下没反应、再点还被拦
+    remoteFetchAt = (res && res.ok) ? Date.now() : 0
+    if (cb) { try { cb() } catch (err) {} }
+  }
+  try { loadApiModels(done, true) } catch (err) { done(null) }
+}
 
 // ===== v815：自定义泡泡框 —— 常量必须在**泡泡构建之前**就绪 =====
 // ⚠️ 血的教训（v815 首版把这些常量写在 13000 行附近，而泡泡在 12600 行就调渲染器了）：
@@ -2242,7 +2274,8 @@ followToggle.addEventListener('change', function () {
   setFollowModelOn(followToggle.checked)
   try { followLabelSync() } catch (err) {}
   try { render() } catch (err) {}
-  try { followModelRefresh() } catch (err) {}
+  // 开关是**用户动作** ⇒ 允许真取一次（否则刚勾上时中转站那一栏是空的）
+  try { remoteBalanceFetch(true, function () { try { followModelRefresh() } catch (err) {} }) } catch (err) {}
 })
 var followNameEl = document.createElement('span')
 followNameEl.style.flex = '0 1 auto'
@@ -4765,14 +4798,16 @@ function loadApiModels(cb, force) {
   if (apiModelsLoading) return // 已有请求在飞：回调排队，避免重复请求
   if (apiModelsLoaded && !force) { apiModelsFlushWaiters(); return }
   apiModelsLoading = true
-  apiModelsFetch(3)
+  // force ⇒ 带 ?refresh=1：宿主据此**跳过**它自己的余额缓存真的去取一次；
+  // 不带 ⇒ 宿主在 20s 内直接复用上次结果，不会打到厂商/中转站。
+  apiModelsFetch(3, !!force)
 }
-function apiModelsFetch(tries) {
+function apiModelsFetch(tries, force) {
   var wasLoaded = apiModelsLoaded
   var opts = { cache: 'no-store' }
   // 兜底超时：host 要串行取各厂商余额，慢的时候不能把界面一直吊着
   try { if (typeof AbortSignal !== 'undefined' && AbortSignal.timeout) opts.signal = AbortSignal.timeout(40000) } catch (err) {}
-  fetch('/dsh-whale/api-models.json', opts)
+  fetch('/dsh-whale/api-models.json' + (force ? '?refresh=1' : ''), opts)
     .then(function (r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json() })
     .then(function (d) {
       if (d && d.ok && Array.isArray(d.models)) {
@@ -4798,7 +4833,7 @@ function apiModelsFetch(tries) {
     })
     .catch(function () {
       if (tries > 0) {
-        setTimeout(function () { try { apiModelsFetch(tries - 1) } catch (err) {} }, tries === 3 ? 600 : 1200)
+        setTimeout(function () { try { apiModelsFetch(tries - 1, force) } catch (err) {} }, tries === 3 ? 600 : 1200)
         return
       }
       apiModelsLoading = false
@@ -5934,8 +5969,10 @@ function refreshUsageMain() {
     .then(function (r) { return r.json() })
     .then(function (d) {
       if (d && d.ok && d.settings) usageSet = d.settings
-      // 面板打开时顺带刷新自定义模型（余额/今日已用/额度）；force 才会真的重新请求
-      try { loadApiModels(null, true) } catch (err) {}
+      // 面板打开/10s 重绘时顺带刷新自定义模型。⚠️ 这里**不能用 force**：
+      // 子界面开着时每 10s 会重绘一次，force 就等于 10s 打一次中转站接口。
+      // 交给节流器（≥30s 一次），想立刻刷新请点本区右上角的「刷新」按钮。
+      try { remoteBalanceFetch(false) } catch (err) {}
       fillUsagePanel(d)
       usageScrollRestore(snap)
       // 双保险：DOM 更新后再恢复一次（内容二次布局可能再次夹住滚动）
@@ -17607,6 +17644,8 @@ function bubbleTodayText() {
 }
 // 当前模型变了：若泡泡正开着，把内容行按新来源重建一次；否则只等下一次弹泡泡自然取新值。
 // （不整泡闪烁：只重建模块行——与 frameReapplyCurrent 的做法一致。）
+// ⚠️ 取数节流器 remoteBalanceFetch() 定义在文件头部的常量区（跟着 FOLLOW_KEY 一起），
+//    这里只负责调用 —— 详见那里的注释。
 function followModelRefresh() {
   function redo() {
     try { render() } catch (err) {}
@@ -17614,8 +17653,9 @@ function followModelRefresh() {
   }
   try {
     redo()
-    // 🐳 顺手刷新自定义模型余额（中转站余额靠 api-models.json 拉），回来后再重绘一次
-    if (followTargetModel()) { try { loadApiModels(redo, true) } catch (err) {} }
+    // 🐳 余额：**轮询路径不联网**，只走节流后的自动取数（≥30s 一次）。
+    // 想立刻刷新就点鲸鱼（见 whaleClick）或用量记录里的「刷新」按钮。
+    if (followTargetModel()) remoteBalanceFetch(false, redo)
   } catch (err) {}
 }
 // 标题里的来源名：跟随中转站时，把**默认标题「DeepSeek 余额」**换成该中转站的名字，
@@ -18964,6 +19004,14 @@ function bubblePreviewInto(container, mods, widthPx, opts) {
 function whaleClick() {
   try {
     if (!bubbleOn) return
+    // 🐳 点一次 = 拉一次（v0.4.2-follow.2）：
+    //   以前余额靠「模型变了就 force 拉」的轮询，实际效果是每秒一条 /api/user/self。
+    //   现在取数只由点击驱动：点鲸鱼时先把中转站余额取一次，回来了再把泡泡内容重绘成新值。
+    try {
+      if (followModelOn && currentIsRemote()) {
+        remoteBalanceFetch(true, function () { try { followModelRefresh() } catch (err) {} })
+      }
+    } catch (err) {}
     if (bubbleScene && (bubbleScene.kind === 'cost' || bubbleScene.kind === 'alert')) return // 消耗/预警提醒期间点鲸鱼不动作(点泡泡才关)
     if (!bubbleShown) {
       bubbleRoundOn = true
@@ -22476,7 +22524,10 @@ try {
     try { if (!document.hidden) resyncSizeCfg() } catch (err) {}
   })
 } catch (err) {}
-setInterval(function () { refresh(false); try { loadApiModels(null, true) } catch (err) {} }, REFRESH_MS)
+// 官方余额：每 60s 跟一次（宿主侧还有 25s 缓存，代价很小）。
+// ⚠️ v0.4.2-follow.2：这里**不再**顺带 force 拉自定义/中转站余额 —— 那条路径会让
+//   中转站的 /api/user/self 变成按分钟~按秒的轮询（用户实测 1s 两条）。余额只在点击时取。
+setInterval(function () { refresh(false) }, REFRESH_MS)
 
 // —— 每轮对话消耗检测：轮询 last-turn.json，出现新 seq 时弹消耗金额泡泡 ——
 var LAST_TURN_URL = '/dsh-whale/last-turn.json'

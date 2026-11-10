@@ -1,7 +1,7 @@
 {
   "name": "dsh-whale-widget",
-  "version": "0.4.2-follow.1",
-  "description": "DSH Web 界面右下角的 DeepSeek 余额小鲸鱼挂件（修改版：余额随当前模型自动切换 DeepSeek 官方 / OpenAI 兼容中转站）。原版 by MeteorNOX，见 README 顶部说明",
+  "version": "0.4.2-follow.2",
+  "description": "DSH Web 界面右下角的 DeepSeek 余额小鲸鱼挂件（修改版：余额随当前模型自动切换 DeepSeek 官方 / OpenAI 兼容中转站；余额按需取数，不做后台轮询）。原版 by MeteorNOX，见 README 顶部说明",
   "keywords": [
     "dsh",
     "dsh-plugin",

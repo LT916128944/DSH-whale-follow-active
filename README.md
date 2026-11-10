@@ -3,8 +3,9 @@
 > **⚠️ 这是第三方修改版，不是原版。**
 > 原版：[MeteorNOX/DeepSeek-Balance-Whale-Widget](https://github.com/MeteorNOX/DeepSeek-Balance-Whale-Widget)（0.4.2，MIT）
 >
-> 本仓库只在原版基础上加了**两处增量**：① 余额随当前模型自动切换（DeepSeek 官方 / OpenAI 兼容中转站）；
-> ② 标题自适应字号。**其余功能与原版完全一致**，完整功能文档见下方原版 README。
+> 本仓库只在原版基础上加了**三处增量**：① 余额随当前模型自动切换（DeepSeek 官方 / OpenAI 兼容中转站）；
+> ② 标题自适应字号；③ 余额取数节流（点一次拉一次，不再按秒轮询中转站接口）。
+> **其余功能与原版完全一致**，完整功能文档见下方原版 README。
 
 ---
 
@@ -23,6 +24,7 @@
 | OpenAI 兼容中转站（任何其它 provider） | 中转站自己的余额 ¥23.95 |
 
 切换是**自动**的，换模型后立刻生效，不用手点。
+（余额**数值**的取数改成"点一次拉一次"，见下面 [五、3](#3-余额什么时候去取不会把中转站打爆)。）
 
 ---
 
@@ -105,7 +107,7 @@ dsh plugin --profile desktop add link:D:\path\to\DSH-whale-follow-active
 
 ---
 
-## 五、两个功能的细节
+## 五、改动细节
 
 ### 1. 为什么按 provider 判、不按 model id 判
 
@@ -126,11 +128,32 @@ dsh plugin --profile desktop add link:D:\path\to\DSH-whale-follow-active
 三条保护：**放得下就一个像素都不改**（官方模型下外观与原版完全一致）；
 **只对标题类文本生效**（随机语句/你自己写的长句该折行，不该缩小）；**文字安全框不受影响**。
 
+### 3. 余额什么时候去取（不会把中转站打爆）
+
+`0.4.2-follow.1` 有个毛病：判断"当前模型变了"的那段代码跑在 1 秒轮询里，
+一旦判定值与上次记下的不一致，就会**每秒**向中转站的 `/api/user/self` 打一次请求
+（真机日志里 1 秒两条）。余额不是秒级指标，这个频率纯属浪费。
+
+`0.4.2-follow.2` 起改成**按需取数**：
+
+| 触发 | 是否联网取余额 |
+|---|---|
+| 点一下鲸鱼/角色（弹出泡泡） | ✅ 取一次 |
+| 点「小鲸鱼记账 → 右上角刷新」 | ✅ 取一次 |
+| 勾选/取消「跟随当前模型」 | ✅ 取一次 |
+| 刷新页面（冷启动） | ✅ 每个模型一次 |
+| 1 秒轮询 / 面板 10 秒重绘 / 切换模型后的自动重判 | ❌ 只重绘界面，**不联网** |
+
+两层保护：前端自动路径最少间隔 **30 秒**（连点 4 秒内也去抖），
+宿主侧 `GET /dsh-whale/api-models.json` 默认读 **20 秒缓存**，
+只有前端显式带 `?refresh=1`（= 用户点击）才真的穿透去取。
+同一个模型的并发刷新会合并成一次请求。
+
 ---
 
 ## 六、已知限制
 
-- 中转站余额**不是实时**：按轮询和每轮对话结束刷新，且 New API 的 `used_quota` 自带落账延迟
+- 中转站余额**不是实时**：只在**点击时**取（点鲸鱼 / 点「刷新」），中间不做后台轮询；且 New API 的 `used_quota` 自带落账延迟
 - 免重启模式下靠读界面属性，**子智能体会话**读不到（那种会话没有模型选择器）；重启后无此限制
 - 上游升级会**整体替换** `node_modules`，改动会丢（DSH 插件机制）。重新覆盖一次即可
 
@@ -140,11 +163,11 @@ dsh plugin --profile desktop add link:D:\path\to\DSH-whale-follow-active
 
 | 文件 | 变化 |
 |---|---|
-| `lib/index.js` | +54 行：监听 `request/context` 等事件，在 `last-turn.json` 下发 `activeModel` |
-| `assets/whale-widget.js` | +300 / -4 行：跟随判定、DOM 兜底、菜单开关、标题缩字号 |
+| `lib/index.js` | +110 行：监听 `request/context` 等事件，在 `last-turn.json` 下发 `activeModel`；各模型余额加 20s 缓存 + 在途合并，只有 `?refresh=1` 才穿透 |
+| `assets/whale-widget.js` | +369 / -19 行：跟随判定、DOM 兜底、菜单开关、标题缩字号、余额取数节流（点一次拉一次） |
 | `lib/accounting.mjs` | 未改动 |
 | `LICENSE` | 追加修改者声明（**原 MIT 声明保留**） |
-| `package.json` | 版本 `0.4.2-follow.1`，补 `upstream` 字段 |
+| `package.json` | 版本 `0.4.2-follow.2`，补 `upstream` 字段 |
 
 纯增量：不改账本结构、不改 `.dshw-api.json` 结构、不碰凭据格式。
 补丁在 `patch/follow-active-model.patch`，可对官方 0.4.2 干净 `git apply`。

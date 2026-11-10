@@ -1,8 +1,8 @@
 diff --git a/assets/whale-widget.js b/assets/whale-widget.js
-index 8606759..66285ed 100644
+index 8606759..3017633 100644
 --- a/assets/whale-widget.js
 +++ b/assets/whale-widget.js
-@@ -358,6 +358,23 @@ var SIZE_URL = '/dsh-whale/size.json'
+@@ -358,6 +358,55 @@ var SIZE_URL = '/dsh-whale/size.json'
  var IMG_URL = '/dsh-whale/image.png?v=2'
  var GIF_URL = '/dsh-whale/rua.gif'
  var BUBBLE_URL = '/dsh-whale/bubble.json'
@@ -23,10 +23,42 @@ index 8606759..66285ed 100644
 +  followModelOn = v !== false
 +  try { localStorage.setItem(FOLLOW_KEY, followModelOn ? '1' : '0') } catch (err) {}
 +}
++// ── 中转站余额取数节流（v0.4.2-follow.2）─────────────────────────────────────
++// 以前：判定"当前模型变了"就直接 loadApiModels(force) 全网拉一遍。可这条判定跑在 1 秒
++// 轮询里（pollActiveModelDom / pollLastTurn），只要界面上的判定值与上次记下的不一致
++// （DOM 抖动、宿主回包先后、选择器被遮住时读不到），就会**每秒**向中转站的
++// /api/user/self 打一次请求 —— 真机日志里 1 秒两条，纯属暴力轮询。
++// 余额不是秒级指标：轮询/重绘路径**一律不联网**，真正联网取数的入口只有三处——
++//   ① 冷启动（模型列表还没拿到，见 bubbleAmountText）
++//   ② 用户点鲸鱼/角色（点一次 = 拉一次，见 whaleClick）
++//   ③ 用户点「小鲸鱼记账 → 刷新」按钮
++// 自动路径再叠一层最小间隔，防止连点或异常抖动把请求放大。
++// 与上面 FOLLOW_KEY 同理：这里必须放在**常量区**，因为主菜单（~2250 行）比泡泡引擎（~17600 行）先执行。
++var REMOTE_FETCH_MIN_MS = 30000 // 自动路径最小间隔
++var REMOTE_FETCH_FORCE_MIN_MS = 4000 // 显式刷新也留一点去抖余量（连点不重复打）
++var remoteFetchAt = 0
++var remoteFetchInFlight = false
++function remoteBalanceFetch(force, cb) {
++  var now = Date.now()
++  var floor = force ? REMOTE_FETCH_FORCE_MIN_MS : REMOTE_FETCH_MIN_MS
++  if (remoteFetchInFlight || (remoteFetchAt && now - remoteFetchAt < floor)) {
++    if (cb) { try { cb() } catch (err) {} }
++    return
++  }
++  remoteFetchAt = now
++  remoteFetchInFlight = true
++  function done(res) {
++    remoteFetchInFlight = false
++    // 失败不占用"冷却时间"，否则用户点一下没反应、再点还被拦
++    remoteFetchAt = (res && res.ok) ? Date.now() : 0
++    if (cb) { try { cb() } catch (err) {} }
++  }
++  try { loadApiModels(done, true) } catch (err) { done(null) }
++}
  
  // ===== v815：自定义泡泡框 —— 常量必须在**泡泡构建之前**就绪 =====
  // ⚠️ 血的教训（v815 首版把这些常量写在 13000 行附近，而泡泡在 12600 行就调渲染器了）：
-@@ -2211,6 +2228,40 @@ function codexStatsCheckbox() {
+@@ -2211,6 +2260,41 @@ function codexStatsCheckbox() {
    codexStatsToggle = el
    return el
  }
@@ -44,7 +76,8 @@ index 8606759..66285ed 100644
 +  setFollowModelOn(followToggle.checked)
 +  try { followLabelSync() } catch (err) {}
 +  try { render() } catch (err) {}
-+  try { followModelRefresh() } catch (err) {}
++  // 开关是**用户动作** ⇒ 允许真取一次（否则刚勾上时中转站那一栏是空的）
++  try { remoteBalanceFetch(true, function () { try { followModelRefresh() } catch (err) {} }) } catch (err) {}
 +})
 +var followNameEl = document.createElement('span')
 +followNameEl.style.flex = '0 1 auto'
@@ -67,7 +100,49 @@ index 8606759..66285ed 100644
  // —— 资源管理:集中查看/删除已导入的图片与音频(角色图/泡泡图/音频片段/音效组) ——
  var rowRes = menuRow()
  var resOpenBtn = document.createElement('button')
-@@ -14038,7 +14089,10 @@ var state = {
+@@ -4714,14 +4798,16 @@ function loadApiModels(cb, force) {
+   if (apiModelsLoading) return // 已有请求在飞：回调排队，避免重复请求
+   if (apiModelsLoaded && !force) { apiModelsFlushWaiters(); return }
+   apiModelsLoading = true
+-  apiModelsFetch(3)
++  // force ⇒ 带 ?refresh=1：宿主据此**跳过**它自己的余额缓存真的去取一次；
++  // 不带 ⇒ 宿主在 20s 内直接复用上次结果，不会打到厂商/中转站。
++  apiModelsFetch(3, !!force)
+ }
+-function apiModelsFetch(tries) {
++function apiModelsFetch(tries, force) {
+   var wasLoaded = apiModelsLoaded
+   var opts = { cache: 'no-store' }
+   // 兜底超时：host 要串行取各厂商余额，慢的时候不能把界面一直吊着
+   try { if (typeof AbortSignal !== 'undefined' && AbortSignal.timeout) opts.signal = AbortSignal.timeout(40000) } catch (err) {}
+-  fetch('/dsh-whale/api-models.json', opts)
++  fetch('/dsh-whale/api-models.json' + (force ? '?refresh=1' : ''), opts)
+     .then(function (r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json() })
+     .then(function (d) {
+       if (d && d.ok && Array.isArray(d.models)) {
+@@ -4747,7 +4833,7 @@ function apiModelsFetch(tries) {
+     })
+     .catch(function () {
+       if (tries > 0) {
+-        setTimeout(function () { try { apiModelsFetch(tries - 1) } catch (err) {} }, tries === 3 ? 600 : 1200)
++        setTimeout(function () { try { apiModelsFetch(tries - 1, force) } catch (err) {} }, tries === 3 ? 600 : 1200)
+         return
+       }
+       apiModelsLoading = false
+@@ -5883,8 +5969,10 @@ function refreshUsageMain() {
+     .then(function (r) { return r.json() })
+     .then(function (d) {
+       if (d && d.ok && d.settings) usageSet = d.settings
+-      // 面板打开时顺带刷新自定义模型（余额/今日已用/额度）；force 才会真的重新请求
+-      try { loadApiModels(null, true) } catch (err) {}
++      // 面板打开/10s 重绘时顺带刷新自定义模型。⚠️ 这里**不能用 force**：
++      // 子界面开着时每 10s 会重绘一次，force 就等于 10s 打一次中转站接口。
++      // 交给节流器（≥30s 一次），想立刻刷新请点本区右上角的「刷新」按钮。
++      try { remoteBalanceFetch(false) } catch (err) {}
+       fillUsagePanel(d)
+       usageScrollRestore(snap)
+       // 双保险：DOM 更新后再恢复一次（内容二次布局可能再次夹住滚动）
+@@ -14038,7 +14126,10 @@ var state = {
    peakHolidays: null,
    status: 'loading',
    message: '',
@@ -79,7 +154,7 @@ index 8606759..66285ed 100644
  }
  // —— 吸附与翻转自定义配置 ——
  // mode: 'ratio' 比例吸附 / 'px' 绝对吸附 / 'off' 关闭（无吸附、无翻转，纯自由）
-@@ -17426,14 +17480,157 @@ function bubbleModuleFontU(level) {
+@@ -17426,14 +17517,160 @@ function bubbleModuleFontU(level) {
    n = Math.max(1, Math.min(50, Math.round(n)))
    return Math.round(40 + (n - 1) * 200 / 49)
  }
@@ -210,6 +285,8 @@ index 8606759..66285ed 100644
  }
 +// 当前模型变了：若泡泡正开着，把内容行按新来源重建一次；否则只等下一次弹泡泡自然取新值。
 +// （不整泡闪烁：只重建模块行——与 frameReapplyCurrent 的做法一致。）
++// ⚠️ 取数节流器 remoteBalanceFetch() 定义在文件头部的常量区（跟着 FOLLOW_KEY 一起），
++//    这里只负责调用 —— 详见那里的注释。
 +function followModelRefresh() {
 +  function redo() {
 +    try { render() } catch (err) {}
@@ -217,8 +294,9 @@ index 8606759..66285ed 100644
 +  }
 +  try {
 +    redo()
-+    // 🐳 顺手刷新自定义模型余额（中转站余额靠 api-models.json 拉），回来后再重绘一次
-+    if (followTargetModel()) { try { loadApiModels(redo, true) } catch (err) {} }
++    // 🐳 余额：**轮询路径不联网**，只走节流后的自动取数（≥30s 一次）。
++    // 想立刻刷新就点鲸鱼（见 whaleClick）或用量记录里的「刷新」按钮。
++    if (followTargetModel()) remoteBalanceFetch(false, redo)
 +  } catch (err) {}
 +}
 +// 标题里的来源名：跟随中转站时，把**默认标题「DeepSeek 余额」**换成该中转站的名字，
@@ -237,7 +315,7 @@ index 8606759..66285ed 100644
  // v782：赠金 / 充值余额两个数值模块的取数（与「总余额(充值金额+赠金)」同源：宿主余额返回体）。
  //   ⚠️ 两个数字**可能拿不到**（厂商没有该字段、或未登录账号）⇒ 显示 `—`，**不显示 0**
  //   —— 0 的意思是"确实没有了"，与"读不到"是两件事（记账也依赖这个区分）。
-@@ -17823,7 +18020,14 @@ function bubbleContentTokenMap(m) {
+@@ -17823,7 +18060,14 @@ function bubbleContentTokenMap(m) {
      // v782：充值余额模块（{recharge_ds}）。
      map['recharge_ds'] = bubbleRechargeText()
    } else if (m.type === 'today') {
@@ -253,7 +331,7 @@ index 8606759..66285ed 100644
      map['expense_ds'] = v
    } else if (m.type === 'session') {
      // v768：对话名模块 —— {session} = 当前对话标题（按模块的「保留长度」截断）
-@@ -18292,7 +18496,7 @@ function bubbleRowContentOf(mod) {
+@@ -18292,7 +18536,7 @@ function bubbleRowContentOf(mod) {
      }
      return { txt: '', line: null }
    }
@@ -262,7 +340,7 @@ index 8606759..66285ed 100644
  }
  // 渲染一组模块为泡泡内容(F2 渲染层:按行分组 → 行内 flex 并排(≤6 模块/行)→ 超宽自动折行;
  // 图片单独一整行;泡泡行数上限维持 6)
-@@ -18414,6 +18618,46 @@ function bubbleRowsTo(parentEl, mods) {
+@@ -18414,6 +18658,46 @@ function bubbleRowsTo(parentEl, mods) {
    }
    // 超宽判定(与旧版一致):先单行渲染,测量实际超出泡泡内宽(560u)才允许该块内折行——
    // 预览与真实共用此逻辑,保证两者一致
@@ -309,7 +387,7 @@ index 8606759..66285ed 100644
    function maybeWrap(blk) {
      if (!blk || blk.peak) return
      try {
-@@ -18442,6 +18686,22 @@ function bubbleRowsTo(parentEl, mods) {
+@@ -18442,6 +18726,22 @@ function bubbleRowsTo(parentEl, mods) {
        }
        var capPx = (compFs && multNow) ? 560 * compFs / multNow : 0
        if (capPx > 0 && blk.el.scrollWidth > capPx + 2) {
@@ -332,7 +410,22 @@ index 8606759..66285ed 100644
          blk.el.style.maxWidth = capPx + 'px'
          blk.el.style.whiteSpace = 'normal'
          blk.el.style.overflowWrap = 'anywhere'
-@@ -19065,6 +19325,15 @@ function render() {
+@@ -18704,6 +19004,14 @@ function bubblePreviewInto(container, mods, widthPx, opts) {
+ function whaleClick() {
+   try {
+     if (!bubbleOn) return
++    // 🐳 点一次 = 拉一次（v0.4.2-follow.2）：
++    //   以前余额靠「模型变了就 force 拉」的轮询，实际效果是每秒一条 /api/user/self。
++    //   现在取数只由点击驱动：点鲸鱼时先把中转站余额取一次，回来了再把泡泡内容重绘成新值。
++    try {
++      if (followModelOn && currentIsRemote()) {
++        remoteBalanceFetch(true, function () { try { followModelRefresh() } catch (err) {} })
++      }
++    } catch (err) {}
+     if (bubbleScene && (bubbleScene.kind === 'cost' || bubbleScene.kind === 'alert')) return // 消耗/预警提醒期间点鲸鱼不动作(点泡泡才关)
+     if (!bubbleShown) {
+       bubbleRoundOn = true
+@@ -19065,6 +19373,15 @@ function render() {
    // 消耗金额泡泡显示期间，余额渲染不覆盖其内容（金额行/标题行/提示行）
    if (costBubbleActive) return
    var amount, hint
@@ -348,7 +441,19 @@ index 8606759..66285ed 100644
    if (state.status === 'error') {
      amount = shown !== null ? fmt(shown, state.currency) : '--'
      hint = state.message ? state.message.slice(0, 14) : '获取失败 · 点击重试'
-@@ -22284,6 +22553,18 @@ function pollLastTurn() {
+@@ -22207,7 +22524,10 @@ try {
+     try { if (!document.hidden) resyncSizeCfg() } catch (err) {}
+   })
+ } catch (err) {}
+-setInterval(function () { refresh(false); try { loadApiModels(null, true) } catch (err) {} }, REFRESH_MS)
++// 官方余额：每 60s 跟一次（宿主侧还有 25s 缓存，代价很小）。
++// ⚠️ v0.4.2-follow.2：这里**不再**顺带 force 拉自定义/中转站余额 —— 那条路径会让
++//   中转站的 /api/user/self 变成按分钟~按秒的轮询（用户实测 1s 两条）。余额只在点击时取。
++setInterval(function () { refresh(false) }, REFRESH_MS)
+ 
+ // —— 每轮对话消耗检测：轮询 last-turn.json，出现新 seq 时弹消耗金额泡泡 ——
+ var LAST_TURN_URL = '/dsh-whale/last-turn.json'
+@@ -22284,6 +22604,18 @@ function pollLastTurn() {
        .then(function (r) { return r.json() })
        .then(function (d) {
          if (!d || !d.ok || typeof d.seq !== 'number') return
@@ -367,7 +472,7 @@ index 8606759..66285ed 100644
          if (!lastCostAligned) {
            // 首次拿到数据：以本地记忆的 seq 为基准，只弹比它更新的轮次
            lastCostAligned = true
-@@ -22313,7 +22594,22 @@ function pollLastTurn() {
+@@ -22313,7 +22645,22 @@ function pollLastTurn() {
        .catch(function () {})
    } catch (err) {}
  }
@@ -392,7 +497,7 @@ index 8606759..66285ed 100644
  // 主界面检测通过（或稍后由 MutationObserver 检测到）后执行挂件初始化；非主界面不启动
  try { dshwTryStart(true) } catch (err) {}
 diff --git a/lib/index.js b/lib/index.js
-index d1acaaa..cdddbe3 100644
+index d1acaaa..2cf09a9 100644
 --- a/lib/index.js
 +++ b/lib/index.js
 @@ -894,6 +894,42 @@ export default {
@@ -462,7 +567,92 @@ index d1acaaa..cdddbe3 100644
          const turn = Number(d.turn)
          const usage = d.usage
          if (!usage || typeof usage !== 'object' || !isFinite(turn)) return
-@@ -3624,6 +3676,8 @@ export default {
+@@ -2622,6 +2674,42 @@ export default {
+         return { ok: false, code: 'HTTP', error: '余额接口请求失败: ' + String((err && err.message) || err).slice(0, 160) }
+       }
+     }
++
++    // ── 余额取数缓存（v0.4.2-follow.2）───────────────────────────────────────
++    // 为什么需要：前端只要有任何一条路径按秒重绘/重判当前模型，就会把
++    // `GET /dsh-whale/api-models.json` 变成按秒请求，而这个路由以前**每次都真取**，
++    // 于是一秒一条 `/api/user/self` 打到中转站（用户实测：日志刷屏）。
++    // 现在：这个路由默认读缓存（MODEL_BALANCE_TTL_MS 内复用上次结果），
++    // 只有显式 `?refresh=1`（= 用户点击）才穿透到厂商/中转站接口；
++    // 同时在途请求合并，同一模型的并发刷新只发一次。
++    const MODEL_BALANCE_TTL_MS = 20 * 1000
++    const modelBalanceCache = new Map() // id -> { at, r }
++    const modelBalanceInFlight = new Map() // id -> Promise
++    function cachedFetch(kind, id, force, run) {
++      const key = kind + ':' + id
++      const now = Date.now()
++      if (!force) {
++        const c = modelBalanceCache.get(key)
++        if (c && now - c.at < MODEL_BALANCE_TTL_MS) return Promise.resolve({ ...c.r, cached: true })
++      }
++      const flying = modelBalanceInFlight.get(key)
++      if (flying) return flying
++      const p = (async () => {
++        let r
++        try { r = await run() } catch (err) { r = { ok: false, code: 'ERROR', error: String((err && err.message) || err) } }
++        // 失败也缓存：否则接口挂掉时会被下一次重绘立刻再打一遍（正是"暴力"的来源）
++        modelBalanceCache.set(key, { at: Date.now(), r })
++        return r
++      })().finally(() => { modelBalanceInFlight.delete(key) })
++      modelBalanceInFlight.set(key, p)
++      return p
++    }
++    function fetchModelBalanceCached(model, force) {
++      return cachedFetch('bal', String((model && model.id) || ''), force, () => fetchModelBalance(model))
++    }
++    function fetchModelQuotaCached(model, force) {
++      return cachedFetch('quota', String((model && model.id) || ''), force, () => fetchModelQuota(model))
++    }
+     // 逐模型记录的骨架：跨天只重置「当日」字段，累计量（tokensTotal/tokensMonth）保留
+     function apiUsageNewDay(cur, day, dayKey) {
+       const prev = cur && typeof cur === 'object' ? cur : {}
+@@ -2950,7 +3038,7 @@ export default {
+       return { ok: true, id, keySaved }
+     }
+     // 列表（含实时余额与各模型提醒/预算）：余额并发取，失败只影响该项
+-    async function apiModelsPayload() {
++    async function apiModelsPayload(force = false) {
+       const models = apiAllModels()
+       const settings = readUsageSettings()
+       const out = []
+@@ -2999,7 +3087,7 @@ export default {
+             entry.hasKey = !!(cred && cred.value)
+           } catch (err) {}
+           try {
+-            const p = await getBalance()
++            const p = await getBalance(force)
+             if (p && p.ok) {
+               entry.balance = Number(p.totalBalance)
+               const summary = daySummary(readUsageLedger(), todayKey())
+@@ -3038,11 +3126,12 @@ export default {
+           // 没有余额接口的厂商（如火山方舟）：余额显示「—」，只用会话事件估算
+           entry.balanceMode = hasBalanceApi ? 'api' : 'events'
+           if (hasBalanceApi && hasKey) {
+-            const r = await fetchModelBalance(m)
++            const r = await fetchModelBalanceCached(m, force)
+             if (r && r.ok) {
+               entry.balance = r.remaining
+               if (r.currency) entry.currency = r.currency
+-              apiRecordBalance(m.id, r.remaining)
++              // 缓存命中时不重复记账（数值没变，记一次就够；也避免按秒写盘）
++              if (!r.cached) apiRecordBalance(m.id, r.remaining)
+               const u = apiTodayUsage(m.id, entry.currency || m.currency)
+               entry.todayUsage = u.amount
+               entry.usageSource = u.source
+@@ -3058,7 +3147,7 @@ export default {
+           // 订阅额度：有额度接口 + 有 key 才请求；失败只影响 plan 字段
+           if (tplM.quota && hasKey) {
+             try {
+-              entry.plan = await fetchModelQuota(m)
++              entry.plan = await fetchModelQuotaCached(m, force)
+               if (entry.plan && !entry.plan.ok && apiPlanNoPlan(entry.plan.error)) entry.plan.hide = true
+             } catch (err) { entry.plan = { ok: false, error: String((err && err.message) || err) } }
+           }
+@@ -3624,6 +3713,8 @@ export default {
          const payload = lastTurn
            ? { ok: true, seq: lastTurnSeq, turn: lastTurn.turn, amount: lastTurn.amount, tokens: lastTurn.tokens, ts: lastTurn.ts }
            : { ok: true, seq: 0, turn: null, amount: null, tokens: null, ts: null }
@@ -471,3 +661,30 @@ index d1acaaa..cdddbe3 100644
          res.writeHead(200, JSON_HEADERS)
          res.end(JSON.stringify(payload))
        },
+@@ -4100,7 +4191,7 @@ export default {
+             const action = String((parsed && parsed.action) || 'save')
+             if (action === 'delete') {
+               const r = apiDeleteModel(parsed.id)
+-              const list = await apiModelsPayload()
++              const list = await apiModelsPayload(true)
+               res.writeHead(r.ok ? 200 : 400, JSON_HEADERS)
+               res.end(JSON.stringify({ ...r, models: list.models }))
+               return
+@@ -4139,12 +4230,15 @@ export default {
+             // 注意：keyValue 在提交体上（不在 model 里），必须合并进去，
+             // 否则前端面板里填的 API key 会被丢弃（密钥永远存不进去）
+             const r = await apiSaveModel({ ...(parsed.model || parsed), keyValue: parsed.keyValue })
+-            const list2 = await apiModelsPayload()
++            const list2 = await apiModelsPayload(true)
+             res.writeHead(r.ok ? 200 : 400, JSON_HEADERS)
+             res.end(JSON.stringify({ ...r, models: list2.models }))
+             return
+           }
+-          const payload = await apiModelsPayload()
++          // v0.4.2-follow.2：默认读缓存（20s），只有显式 ?refresh=1 才真去取各厂商余额。
++          // 前端不带这个参数就不会产生任何外部请求 ⇒ 无论哪条路径被按秒重绘，中转站都收不到风暴。
++          const force = new URL(req.url || '/', 'http://localhost').searchParams.get('refresh') === '1'
++          const payload = await apiModelsPayload(force)
+           res.writeHead(200, JSON_HEADERS)
+           res.end(JSON.stringify(payload))
+         } catch (err) {
